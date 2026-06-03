@@ -100,9 +100,7 @@ NEARBUILDERS_API_KEY=your_api_key_here #API KEY FROM NEARBUILDERS WEB UI DASHBOA
 
 In [@BotFather](https://t.me/BotFather):
 
-1. Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned
-
-The `/onboard` command is registered automatically when the bot starts up and will appear in the command button menu (bottom right ⌨️) in any group the bot has been added to.
+Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned
 
 ### 6. Update the bot username
 
