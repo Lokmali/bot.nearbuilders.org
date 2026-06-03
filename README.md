@@ -1,121 +1,232 @@
-# bot.nearbuilders.org
+# NEAR Builders Telegram Bot
 
-## Telegram Bot Builder Nomination Guide
+A Telegram bot for nominating and onboarding builders to the [NEAR](https://near.org) ecosystem. Admins (or any group member) can nominate someone directly from a group chat, the bot contacts them via DM to walk through a profile setup, and on completion submits their profile to the NEAR Builders API for review.
 
-### 1. Create an API Key
+---
 
-A logged-in user (e.g., `nathan.near`) creates an API key through the UI or server-side:
+## Features
 
-**Via UI:** Settings → API Keys → Create Key
+- `/onboard` command in any group - two ways to use it:
+  - By username: `/onboard @username` (anywhere in the chat)
+  - By reply: send `/onboard` as a reply to the target user's message
+- Nominated users are messaged directly to complete their profile
+- Username lookup uses a three-tier approach: DB (most reliable) > Telegram API > username-only fallback
+- If the user hasn't started the bot yet, a prompt is posted in the group with a link to start it
+- Full DM onboarding flow with a dedicated question per field
+- Skills selection via interactive toggle buttons (tap to add/remove)
+- Links builder via guided Add Link flow (label > URL > repeat as needed)
+- Summary review at the end with per-field edit buttons in a 2-column grid and a full-width Confirm & Submit button
+- Submits to the NEAR Builders API on confirmation
+- PostgreSQL logging of nominated users and nomination events
+- Rotating log file at `logs/bot.log`
 
-**Via API (server-side):**
+---
 
-```bash
-# First, get a session cookie by signing in via NEAR SIWN
-# Then create an API key:
-curl -X POST https://nearbuilders.org/api/auth/api-key/create \
-  -H "Content-Type: application/json" \
-  -H "Cookie: <session-cookie>" \
-  -d '{
-    "name": "nearbuildersbot",
-    "configId": "user-keys"
-  }'
+## Onboarding Flow
+
+```
+/onboard @username  (or as a reply to a message)
+  └─> DM sent to nominated user
+        └─> /start
+              ├─> NEAR Address (optional)
+              ├─> Name (optional)
+              ├─> Bio (optional, max 1000 chars - trimmed if exceeded)
+              ├─> Skills (toggle button selection)
+              ├─> Location (optional)
+              ├─> Links (guided Add Link flow)
+              └─> Summary with edit buttons
+                    └─> Confirm & Submit > POST to NEAR Builders API
 ```
 
-Response includes the full key (prefixed, e.g., `nb_k_live_xxxxx...`). **Save this** — it only appears once.
+All fields are optional. Users can skip any step using the ⏭️ Skip button.
 
-If you need scoped permissions (not required for `propose`, any key works), create server-side:
+---
+
+## Prerequisites
+
+- Python 3.10+
+- A PostgreSQL database
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- A NEAR Builders API key
+
+---
+
+## Installation
+
+### 1. Clone the repository
 
 ```bash
-curl -X POST https://nearbuilders.org/api/auth/api-key/create \
-  -H "Content-Type: application/json" \
-  -H "Cookie: <session-cookie>" \
-  -d '{
-    "name": "nearbuildersbot",
-    "configId": "user-keys",
-    "permissions": {
-      "proposals": ["create"]
+git clone https://github.com/NEARBuilders/bot.nearbuilders.org.git
+cd bot.nearbuilders.org
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure environment variables
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token_here #BOT TOKEN FROM BOTFATHER
+DATABASE_URL=postgresql://user:password@localhost:5432/nearbuilders #POSTGRES LOCAL INSTALL
+NEARBUILDERS_API_URL=https://nearbuilders.org/api/proposals #POST
+NEARBUILDERS_API_KEY=your_api_key_here #API KEY FROM NEARBUILDERS WEB UI DASHBOARD
+
+# Optional: override the default allowed skills list (comma-separated)
+# ALLOWED_SKILLS=Frontend,Backend,Rust,Typescript,DeFi
+```
+
+### 5. BotFather setup
+
+In [@BotFather](https://t.me/BotFather):
+
+1. Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned
+
+The `/onboard` command is registered automatically when the bot starts up and will appear in the command button menu (bottom right ⌨️) in any group the bot has been added to.
+
+### 6. Update the bot username
+
+In `bot.py`, update this line to match your bot's actual username - this is required for onboarding as an auto message if the user has not interacted with the bot before:
+
+```python
+BOT_USERNAME = "@nearbuildersbot"
+```
+
+### 7. Run
+
+```bash
+python bot.py
+```
+
+The database tables are created automatically on first run.
+
+---
+
+## Running via Windows Task Scheduler
+
+1. Create a new task in Task Scheduler
+2. Set **Action** to: `cmd /c "cd /d C:\path\to\bot.nearbuilders.org && venv\Scripts\python.exe bot.py"`
+3. Logs will be written to `logs\bot.log` in the bot directory automatically
+
+---
+
+## Project Structure
+
+```
+bot.nearbuilders.org/
+├── bot.py              # Main bot - all Telegram handlers and entry point
+├── conversation.py     # State machine for the onboarding flow
+├── config.py           # Allowed skills list (env override supported)
+├── db.py               # PostgreSQL connection, schema, and queries
+├── api_client.py       # POST to the NEAR Builders API
+├── requirements.txt    # Pinned dependencies
+├── .env.example        # Environment variable template
+└── logs/               # Created automatically on first run
+    └── bot.log
+```
+
+---
+
+## Database Schema
+
+**`bot_users`** - every user who has been nominated (grants them access through `/start`)
+
+| Column | Type | Description |
+|---|---|---|
+| `user_id` | BIGINT | Telegram user ID (primary key) |
+| `username` | TEXT | Telegram @username |
+| `first_name` | TEXT | Telegram first name |
+| `started_at` | TIMESTAMPTZ | When they were first registered |
+| `updated_at` | TIMESTAMPTZ | Last updated |
+
+**`nomination_log`** - every `/onboard` event
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | SERIAL | Primary key |
+| `nominated_user_id` | BIGINT | Who was nominated |
+| `nominated_by_user_id` | BIGINT | Who nominated them |
+| `group_chat_id` | BIGINT | Which group the command was used in |
+| `created_at` | TIMESTAMPTZ | When it happened |
+
+---
+
+## API Integration
+
+On confirmation, the bot POSTs to `https://nearbuilders.org/api/proposals` with the following body:
+
+```json
+{
+  "pluginId": "builders",
+  "entityId": "yourname.near",
+  "payload": {
+    "name": "Your Name",
+    "bio": "Short bio",
+    "skills": ["Rust", "DeFi"],
+    "location": "Remote",
+    "links": {
+      "github": "https://github.com/yourname"
     }
-  }'
+  },
+  "source": "telegram",
+  "metadata": {
+    "nominatedBy": "telegram:123456789",
+    "telegramChatId": -1001234567890
+  }
+}
 ```
 
-**Permissions note:** The `propose` endpoint accepts ANY valid API key — no specific permissions are checked. The `requireAuthOrApiKey` middleware only verifies the key exists and is valid. You can optionally set permissions for future use or auditing, but they're not enforced on `propose` today.
+- `entityId` uses the NEAR address if provided, otherwise falls back to `telegram:<user_id>`
+- All payload fields are optional
+- `nominatedBy` and `telegramChatId` are sourced from the nomination log in the database
 
-### 2. Nominate a Builder via Telegram Bot
+---
 
-The bot calls the API with the API key:
+## Default Skills List
 
-```bash
-curl -X POST https://nearbuilders.org/api/rpc/proposals \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: nb_k_live_xxxxx..." \
-  -d '{
-    "pluginId": "builders",
-    "entityId": "alice.near",
-    "payload": {
-      "name": "Alice",
-      "bio": "Smart contract developer on NEAR",
-      "skills": ["Rust", "Smart Contracts", "NEAR"],
-      "location": "Remote"
-    },
-    "source": "telegram",
-    "metadata": {
-      "nominatedBy": "telegram:123456789",
-      "telegramChatId": -1001234567890
-    }
-  }'
+The following skills are available by default. Override via `ALLOWED_SKILLS` in `.env`:
+
+`Frontend` · `Backend` · `Product Owner` · `Smart Contract` · `Rust` · `Typescript` · `DeFi` · `AI Automation` · `DevOps` · `Data`
+
+---
+
+## Dependencies
+
+```
+anyio==4.13.0
+certifi==2026.5.20
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.27.0
+idna==3.16
+psycopg2-binary==2.9.12
+python-dotenv==1.0.1
+python-telegram-bot==21.6
+sniffio==1.3.1
 ```
 
-**Key fields:**
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `pluginId` | string | Yes | Always `"builders"` |
-| `entityId` | string | Yes | NEAR account ID (e.g., `"alice.near"`) or platform-scoped ID (e.g., `"telegram:123456789"`) if NEAR account not yet linked |
-| `payload` | object | Yes | Builder data: `name`, `bio`, `skills` (array), `location`, `links` (object), `userId` |
-| `source` | string | No | Origin label, e.g., `"telegram"` |
-| `metadata` | object | No | Arbitrary JSON — use for tracking (e.g., `{"nominatedBy": "telegram:123456789"}`) |
-| `idempotencyKey` | string | No | Dedup key — use to prevent double submissions from the same nomination |
+---
 
-**For users without NEAR accounts yet:** Use `entityId: "telegram:<user_id>"`. When the admin approves, they should update the `entityId` to the actual NEAR account (or the Telegram bot can resolve it later). The `createBuilder` callback will receive `nearAccount: "telegram:123456789"` which will need NEAR account resolution during or before approval.
+## License
 
-### 3. What Happens Next
-
-1. **Proposal created** with `reviewStatus: "pending"`, `createdBy: <api-key-owner-userId>`, `source: "telegram"`
-2. **Admin reviews** at `/dashboard` — sees the proposal with name, bio, skills, location
-3. **Admin approves** → `createCallbacks.builders` fires → builder record created in the database
-4. **Builder appears** on `/builders` listing and `/builders/:account` profile page
-
-**If NEAR account not yet linked** (`entityId` is `telegram:123456789`):
-- The admin dashboard will show `telegram:123456789` as the entity ID
-- Admin should coordinate NEAR account linking before approval, or the Telegram bot should gather the NEAR account during a conversation with the nominated user first
-
-### 4. Idempotency
-
-To prevent duplicate nominations from the same Telegram message:
-
-```bash
-curl -X POST https://nearbuilders.org/api/rpc/proposals \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: nb_k_live_xxxxx..." \
-  -d '{
-    "pluginId": "builders",
-    "entityId": "alice.near",
-    "payload": { ... },
-    "source": "telegram",
-    "metadata": { "nominatedBy": "telegram:123456789" },
-    "idempotencyKey": "tg-nom-123456789-alice.near"
-  }'
-```
-
-If the same `(pluginId, idempotencyKey)` is submitted again, the existing proposal is returned without creating a duplicate.
-
-### 5. Checking Proposal Status
-
-```bash
-curl -G https://nearbuilders.org/api/rpc/proposals \
-  -H "x-api-key: nb_k_live_xxxxx..." \
-  --data-urlencode "pluginId=builders" \
-  --data-urlencode "entityId=alice.near"
-```
-
-Returns proposals with `reviewStatus`: `"pending"`, `"approved"`, `"rejected"`, or `"removed"`.
+MIT
