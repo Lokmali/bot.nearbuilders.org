@@ -16,10 +16,21 @@ SKILL_MAX_CHARS = 50
 MAX_SKILLS = 20
 
 
+METEOR_WALLET_CREATE_URL = "https://wallet.meteorwallet.app/add_wallet/create_new"
+VALID_NEAR_ADDRESS_SUFFIXES = (".near", ".tg")
+
+
+def is_valid_near_address(address: str) -> bool:
+    """NEAR account IDs must end with .near or .tg."""
+    lower = address.strip().lower()
+    return lower.endswith(VALID_NEAR_ADDRESS_SUFFIXES)
+
+
 STEP_QUESTIONS = {
     "near_address": (
         "🔗 What is your NEAR address?\n\n"
-        "e.g. <code>yourname.near</code>"
+        "e.g. <code>yourname.near</code> or <code>yourname.tg</code>\n\n"
+        "If you don't have a NEAR address yet, create a new one using the button below."
     ),
     "name":     "👤 What's your name?",
     "bio":      f"📝 Describe yourself in a short bio:\n\nMax {BIO_MAX_CHARS} characters - anything longer will be trimmed.",
@@ -172,7 +183,20 @@ def apply_answer(state: ConversationState, text: str) -> str | None:
     step = state.editing_field or state.current_step
 
     if step == "near_address":
-        state.data["near_address"] = text.strip() if text.strip() else None
+        cleaned = text.strip()
+        if not cleaned or cleaned.lower() == "skip":
+            return (
+                "⚠️ A NEAR address is required.\n\n"
+                "Enter your address (e.g. <code>yourname.near</code> or <code>yourname.tg</code>) or tap "
+                "<b>Create NEAR wallet</b> to set one up."
+            )
+        if not is_valid_near_address(cleaned):
+            return (
+                "⚠️ That doesn't look like a valid NEAR address.\n\n"
+                "Your address must end with <code>.near</code> or <code>.tg</code> "
+                "(e.g. <code>yourname.near</code>)."
+            )
+        state.data["near_address"] = cleaned
 
     elif step == "name":
         if len(text) > NAME_MAX_CHARS:

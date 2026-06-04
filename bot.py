@@ -24,6 +24,8 @@ from conversation import (
     STEPS,
     STEP_QUESTIONS,
     STEP_LABELS,
+    METEOR_WALLET_CREATE_URL,
+    is_valid_near_address,
     get_session,
     start_session,
     clear_session,
@@ -89,6 +91,16 @@ def build_edit_keyboard() -> InlineKeyboardMarkup:
 def build_skip_keyboard() -> InlineKeyboardMarkup:
     """Single skip button shown under each onboarding question."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Skip", callback_data="skip")]])
+
+
+def build_near_address_keyboard() -> InlineKeyboardMarkup:
+    """Create-wallet link for users who do not have a NEAR account yet."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Create NEAR wallet",
+            url=METEOR_WALLET_CREATE_URL,
+        ),
+    ]])
 
 
 def build_skills_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
@@ -157,6 +169,13 @@ async def send_next_question(user_id: int, context: ContextTypes.DEFAULT_TYPE):
             )
         elif step == "links":
             await send_links_overview(user_id, context)
+        elif step == "near_address":
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=question,
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_near_address_keyboard(),
+            )
         else:
             await context.bot.send_message(
                 chat_id=user_id,
@@ -210,7 +229,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ You've been nominated! Let's set up your builder profile.\n\n"
         "I'll ask you a few quick questions. "
-        "All fields are optional - type <code>skip</code> to leave any field blank.\n\n"
+        "A NEAR address is required; other fields are optional — type <code>skip</code> to leave them blank.\n\n"
         "Let's get started! 🚀",
         parse_mode=ParseMode.HTML,
     )
@@ -324,7 +343,7 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=(
                     f"🎉 You've been nominated as a NEAR Builder by {invoker_mention}!\n\n"
                     "Let's set up your builder profile. I'll ask you a few quick questions.\n"
-                    "Type <code>skip</code> at any point to leave a field blank.\n\n"
+                    "A NEAR address is required; type <code>skip</code> on other fields to leave them blank.\n\n"
                     "Let's go! 🚀"
                 ),
                 parse_mode=ParseMode.HTML,
@@ -447,6 +466,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "confirm":
+        near = (state.data.get("near_address") or "").strip()
+        if not near:
+            await query.answer(
+                "Please add your NEAR address before submitting.",
+                show_alert=True,
+            )
+            return
+        if not is_valid_near_address(near):
+            await query.answer(
+                "NEAR address must end with .near or .tg.",
+                show_alert=True,
+            )
+            return
         payload = build_api_payload(state)
         await query.edit_message_text(
             "⏳ Submitting your profile...",
@@ -536,6 +568,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_next_question(user.id, context)
 
     elif data == "skip":
+        step = state.editing_field or state.current_step
+        if step == "near_address":
+            await query.answer(
+                "A NEAR address is required. Enter your address or create a wallet first.",
+                show_alert=True,
+            )
+            return
         skip_current_step(state)
         new_step = next_step(state)
         if new_step == "done":
@@ -563,11 +602,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif field == "links":
             await send_links_overview(user.id, context)
+        elif field == "near_address":
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"✏️ <b>Editing {STEP_LABELS[field]}</b>\n\n{STEP_QUESTIONS[field]}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_near_address_keyboard(),
+            )
         else:
             await context.bot.send_message(
                 chat_id=user.id,
                 text=f"✏️ <b>Editing {STEP_LABELS[field]}</b>\n\n{STEP_QUESTIONS[field]}",
                 parse_mode=ParseMode.HTML,
+                reply_markup=build_skip_keyboard(),
             )
 
 
