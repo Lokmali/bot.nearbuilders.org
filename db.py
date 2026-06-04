@@ -26,12 +26,33 @@ def setup_db():
 
                 CREATE TABLE IF NOT EXISTS nomination_log (
                     id                   SERIAL PRIMARY KEY,
-                    nominated_user_id    BIGINT NOT NULL,
+                    nominated_user_id    BIGINT,
+                    nominated_username   TEXT,
+                    nominated_by_user_id BIGINT NOT NULL,
+                    group_chat_id        BIGINT NOT NULL,
+                    created_at           TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS pending_nominations (
+                    username             TEXT PRIMARY KEY,
                     nominated_by_user_id BIGINT NOT NULL,
                     group_chat_id        BIGINT NOT NULL,
                     created_at           TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
+
+            # Migrate existing nomination_log if nominated_username column is missing
+            cur.execute("""
+                ALTER TABLE nomination_log
+                ADD COLUMN IF NOT EXISTS nominated_username TEXT;
+            """)
+
+            # Migrate existing nomination_log if nominated_user_id is NOT NULL constrained
+            cur.execute("""
+                ALTER TABLE nomination_log
+                ALTER COLUMN nominated_user_id DROP NOT NULL;
+            """)
+
         conn.commit()
     print("Database tables ready.")
 
@@ -41,6 +62,17 @@ def has_started_bot(user_id: int) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM bot_users WHERE user_id = %s", (user_id,)
+            )
+            return cur.fetchone() is not None
+
+
+def has_pending_nomination(username: str) -> bool:
+    """Check if a username has a pending nomination (no user ID yet)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM pending_nominations WHERE LOWER(username) = LOWER(%s)",
+                (username,)
             )
             return cur.fetchone() is not None
 
@@ -59,14 +91,67 @@ def register_user(user_id: int, username: str | None, first_name: str | None):
         conn.commit()
 
 
-def log_nomination(nominated_user_id: int, nominated_by_user_id: int, group_chat_id: int):
+def log_nomination(nominated_by_user_id: int, group_chat_id: int,
+                   nominated_user_id: int | None = None,
+                   nominated_username: str | None = None):
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO nomination_log (nominated_user_id, nominated_by_user_id, group_chat_id)
-                VALUES (%s, %s, %s)
-            """, (nominated_user_id, nominated_by_user_id, group_chat_id))
+                INSERT INTO nomination_log
+                    (nominated_user_id, nominated_username, nominated_by_user_id, group_chat_id)
+                VALUES (%s, %s, %s, %s)
+            """, (nominated_user_id, nominated_username, nominated_by_user_id, group_chat_id))
         conn.commit()
+
+
+def add_pending_nomination(username: str, nominated_by_user_id: int, group_chat_id: int):
+    """Store a nomination for a user we don't have a user_id for yet."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO pending_nominations (username, nominated_by_user_id, group_chat_id)
+                VALUES (LOWER(%s), %s, %s)
+                ON CONFLICT (username) DO UPDATE
+                    SET nominated_by_user_id = EXCLUDED.nominated_by_user_id,
+                        group_chat_id = EXCLUDED.group_chat_id,
+                        created_at = NOW()
+            """, (username, nominated_by_user_id, group_chat_id))
+        conn.commit()
+
+
+def claim_pending_nomination(user_id: int, username: str) -> dict | None:
+    """
+    When a user /starts the bot, check if there's a pending nomination for their username.
+    If found, register them properly, log it, and clear the pending record.
+    Returns the nomination dict or None.
+    """
+    if not username:
+        return None
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM pending_nominations WHERE LOWER(username) = LOWER(%s)",
+                (username,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            nomination = dict(row)
+
+            # Log with the now-known user_id
+            cur.execute("""
+                INSERT INTO nomination_log
+                    (nominated_user_id, nominated_username, nominated_by_user_id, group_chat_id)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, username, nomination["nominated_by_user_id"], nomination["group_chat_id"]))
+
+            # Clear the pending record
+            cur.execute(
+                "DELETE FROM pending_nominations WHERE LOWER(username) = LOWER(%s)",
+                (username,)
+            )
+        conn.commit()
+    return nomination
 
 
 def get_user_by_username(username: str) -> dict | None:
@@ -82,10 +167,7 @@ def get_user_by_username(username: str) -> dict | None:
 
 
 def get_nomination(nominated_user_id: int) -> dict | None:
-    """
-    Return the most recent nomination record for a user.
-    Provides nominated_by_user_id and group_chat_id for the API payload.
-    """
+    """Return the most recent nomination record for a user."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
