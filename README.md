@@ -10,8 +10,9 @@ A Telegram bot for nominating and onboarding builders to the [NEAR](https://near
   - By username: `/onboard @username` (anywhere in the chat)
   - By reply: send `/onboard` as a reply to the target user's message
 - Nominated users are messaged directly to complete their profile
-- Username lookup uses a three-tier approach: DB (most reliable) > Telegram API > username-only fallback
-- If the user hasn't started the bot yet, a prompt is posted in the group with a link to start it
+- Username lookup uses a three-tier approach: DB (most reliable) → Telegram API → username-only fallback
+- Pending nominations stored by username - if a user can't be resolved immediately, the nomination is saved and claimed automatically when they start the bot
+- If the user hasn't started the bot yet, a group message is posted with a **💬 Start Chat** button
 - Full DM onboarding flow with a dedicated question per field
 - Skills selection via interactive toggle buttons (tap to add/remove)
 - Links builder via guided Add Link flow (label > URL > repeat as needed)
@@ -26,16 +27,18 @@ A Telegram bot for nominating and onboarding builders to the [NEAR](https://near
 
 ```
 /onboard @username  (or as a reply to a message)
-  └─> DM sent to nominated user
-        └─> /start
-              ├─> NEAR Address (optional)
-              ├─> Name (optional)
-              ├─> Bio (optional, max 1000 chars - trimmed if exceeded)
-              ├─> Skills (toggle button selection)
-              ├─> Location (optional)
-              ├─> Links (guided Add Link flow)
-              └─> Summary with edit buttons
-                    └─> Confirm & Submit > POST to NEAR Builders API
+  └─> If user ID known: DM sent immediately
+  └─> If user ID unknown: nomination saved, Start Chat button posted in group
+        └─> User clicks Start Chat → /start
+              └─> Pending nomination claimed automatically
+                    ├─> NEAR Address (optional)
+                    ├─> Name (optional)
+                    ├─> Bio (optional, max 1000 chars - trimmed if exceeded)
+                    ├─> Skills (toggle button selection)
+                    ├─> Location (optional)
+                    ├─> Links (guided Add Link flow)
+                    └─> Summary with edit buttons
+                          └─> Confirm & Submit → POST to NEAR Builders API
 ```
 
 All fields are optional. Users can skip any step using the ⏭️ Skip button.
@@ -102,6 +105,8 @@ In [@BotFather](https://t.me/BotFather):
 
 Go to **Bot Settings > Group Privacy > Turn Off** so the bot can read messages in groups without being @mentioned
 
+The bot command menu is intentionally left empty to prevent the `/` button from auto-firing the command before a username is entered.
+
 ### 6. Update the bot username
 
 In `bot.py`, update this line to match your bot's actual username - this is required for onboarding as an auto message if the user has not interacted with the bot before:
@@ -116,7 +121,7 @@ BOT_USERNAME = "@nearbuildersbot"
 python bot.py
 ```
 
-The database tables are created automatically on first run.
+The database tables are created automatically on first run. If upgrading from an earlier version, `setup_db` will automatically apply any missing column migrations on restart - no manual SQL needed.
 
 ---
 
@@ -166,6 +171,27 @@ bot.nearbuilders.org/
 | `nominated_by_user_id` | BIGINT | Who nominated them |
 | `group_chat_id` | BIGINT | Which group the command was used in |
 | `created_at` | TIMESTAMPTZ | When it happened |
+
+**`pending_nominations`** - nominations where the user ID couldn't be resolved at nomination time
+
+| Column | Type | Description |
+|---|---|---|
+| `username` | TEXT | @username (primary key, lowercase) |
+| `nominated_by_user_id` | BIGINT | Who nominated them |
+| `group_chat_id` | BIGINT | Which group the command was used in |
+| `created_at` | TIMESTAMPTZ | When it happened |
+
+When the nominated user clicks Start Chat and sends `/start`, the pending record is claimed automatically - their real user ID is resolved, they are registered in `bot_users`, and the pending record is deleted.
+
+---
+
+## Username Lookup
+
+When `/onboard @username` is used, the bot resolves the target user via three methods in order:
+
+1. **DB lookup** - checks `bot_users` by username. Most reliable if they've previously interacted with the bot
+2. **Telegram API** - calls `get_chat_member` to resolve the username to a user ID
+3. **Username-only fallback** - if both fail, stores a pending nomination in `pending_nominations` and posts a group message with a **💬 Start Chat** button. The nomination is claimed automatically when they `/start` the bot
 
 ---
 
