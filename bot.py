@@ -61,19 +61,22 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 logger = logging.getLogger(__name__)
 logger.info(f"Logging to {log_path}")
 
-BOT_USERNAME = "@nearbuildersbot"  #Update to match your bot's username
+BOT_USERNAME = "@nearbuildersbot"  # Update to match your bot's username
 
 
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-#Helpers
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def build_edit_keyboard() -> InlineKeyboardMarkup:
     """Inline keyboard with edit buttons in 2 columns and Confirm at the bottom."""
     buttons = []
     steps = list(STEPS)
-    #Pair up steps into rows of 2
+    # Pair up steps into rows of 2
     for i in range(0, len(steps), 2):
         row = [InlineKeyboardButton(f"✏️ {STEP_LABELS[steps[i]]}", callback_data=f"edit:{steps[i]}")]
         if i + 1 < len(steps):
@@ -89,7 +92,7 @@ def build_skip_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_skills_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
-    """Toggle keyboard for skills - selected ones show tick, two per row."""
+    """Toggle keyboard for skills- selected ones show ✅, two per row."""
     buttons = []
     row = []
     for skill in ALLOWED_SKILLS:
@@ -100,7 +103,7 @@ def build_skills_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    #Done and Skip on the last row
+    # Done and Skip on the last row
     buttons.append([
         InlineKeyboardButton("✅ Done", callback_data="skills_done"),
         InlineKeyboardButton("⏭️ Skip", callback_data="skip"),
@@ -118,7 +121,7 @@ def build_links_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_links_confirm_keyboard(label: str) -> InlineKeyboardMarkup:
-    """Keyboard shown after label is entered - confirm or re-enter."""
+    """Keyboard shown after label is entered- confirm or re-enter."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f'✅ Use "{label}"', callback_data=f"link_label_confirm:{label}")],
         [InlineKeyboardButton("✏️ Re-enter label", callback_data="link_add")],
@@ -174,23 +177,33 @@ async def send_summary(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_edit_keyboard(),
     )
 
-#/start - DM from user
+
+# ---------------------------------------------------------------------------
+# /start  - DM from user
+# ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    #Always show the nomination message first
+    # Check for a pending nomination by username (for username-only nomination path)
+    if user.username and not db.has_started_bot(user.id):
+        pending = db.claim_pending_nomination(user.id, user.username)
+        if pending:
+            logger.info(f"Claimed pending nomination for @{user.username} (user_id={user.id})")
+            db.register_user(user.id, user.username, user.first_name)
+
+    # Always show the nomination message first
     await update.message.reply_text(
         "👋 Welcome to the <b>NEAR Builders</b> onboarding bot!\n\n"
         "You will need to be nominated to enter the bot!",
         parse_mode=ParseMode.HTML,
     )
 
-    #If not nominated, stop here
+    # If not nominated, stop here
     if not db.has_started_bot(user.id):
         return
 
-    #Nominated - refresh user record and kick off the onboarding flow
+    # Nominated - refresh user record and kick off the onboarding flow
     db.register_user(user.id, user.username, user.first_name)
     start_session(user.id)
 
@@ -203,7 +216,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await send_next_question(user.id, context)
 
-#/onboard  - used in a group, as a reply to the target user
+
+# ---------------------------------------------------------------------------
+# /nominate-builder  - used in a group, as a reply to the target user
+# ---------------------------------------------------------------------------
 
 async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -211,13 +227,14 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invoker = update.effective_user
     target = None
 
-    #Method 1: /onboard @username
+    # Method 1: /onboard @username
     if context.args:
         username = context.args[0].lstrip("@")
 
-        #Try DB first (most reliable - works if they've interacted with the bot before)
+        # Try DB first (most reliable- works if they've interacted with the bot before)
         db_user = db.get_user_by_username(username)
         if db_user:
+            logger.info(f"Username @{username} resolved from DB (user_id={db_user['user_id']})")
             from telegram import User as TGUser
             target = type("User", (), {
                 "id": db_user["user_id"],
@@ -227,12 +244,14 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "mention_html": lambda self=None: f'<a href="tg://user?id={db_user["user_id"]}">{db_user["first_name"] or db_user["username"]}</a>',
             })()
         else:
-            #Fall back to get_chat_member - works even if they haven't used the bot
+            # Fall back to get_chat_member- works even if they haven't used the bot
             try:
                 chat_member = await context.bot.get_chat_member(chat.id, f"@{username}")
                 target = chat_member.user
-            except Exception:
-                #Can't resolve via API either - proceed with username only, no user_id
+                logger.info(f"Username @{username} resolved via get_chat_member (user_id={target.id})")
+            except Exception as e:
+                logger.info(f"Username @{username} could not be resolved ({e})- using username-only fallback")
+                # Can't resolve via API either- proceed with username only, no user_id
                 target = type("User", (), {
                     "id": None,
                     "username": username,
@@ -241,11 +260,11 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "mention_html": lambda self=None: f"@{username}",
                 })()
 
-    #Method 2: reply to a message
+    # Method 2: reply to a message
     elif message.reply_to_message:
         target = message.reply_to_message.from_user
 
-    #Neither provided
+    # Neither provided
     else:
         await message.reply_text(
             "⚠️ Use this command as a <b>reply</b> to someone, or with a username:\n"
@@ -254,7 +273,7 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    #Can't nominate a bot
+    # Can't nominate a bot
     if target.is_bot:
         await message.reply_text("🤖 You can't nominate a bot!")
         return
@@ -262,26 +281,42 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_mention = target.mention_html() if callable(target.mention_html) else target.mention_html
     invoker_mention = invoker.mention_html()
 
-    #If we have no user ID we can't DM them - just prompt in the group
+    # If we have no user ID we can't DM them- store pending nomination by username
     if not target.id:
+        db.add_pending_nomination(target.username, invoker.id, chat.id)
+        db.log_nomination(
+            nominated_by_user_id=invoker.id,
+            group_chat_id=chat.id,
+            nominated_username=target.username,
+        )
+        logger.info(f"Pending nomination stored for @{target.username}")
+        bot_username = BOT_USERNAME.lstrip("@")
+        start_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Start Chat", url=f"https://t.me/{bot_username}")]
+        ])
         await message.reply_text(
             f"👋 {target_mention}, you've been nominated as a NEAR Builder by {invoker_mention}!\n\n"
-            f"To complete your profile, please start a chat with me first: {BOT_USERNAME}",
+            "To complete your profile, please start a chat with me first by clicking the button below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=start_keyboard,
         )
         return
 
-    #Register the nominated user so they can pass the /start gate,
-    #then log the nomination event
+    # Check if they've previously started the bot BEFORE registering them
+    already_started = db.has_started_bot(target.id)
+
+    # Register the nominated user so they can pass the /start gate,
+    # then log the nomination event
     db.register_user(target.id, target.username, target.first_name)
     db.log_nomination(
         nominated_user_id=target.id,
         nominated_by_user_id=invoker.id,
         group_chat_id=chat.id,
+        nominated_username=target.username,
     )
 
-    if db.has_started_bot(target.id):
-        #User has already started the bot - send them a DM directly
+    if already_started:
+        # User has already started the bot - send them a DM directly
         try:
             start_session(target.id)
             await context.bot.send_message(
@@ -297,27 +332,42 @@ async def cmd_nominate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_next_question(target.id, context)
 
             target_at = f"@{target.username}" if target.username else target_mention
+            start_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Start Chat", url=f"https://t.me/{BOT_USERNAME.lstrip('@')}")]
+            ])
             await message.reply_text(
                 f"✅ {target_at} has been nominated by {invoker_mention}! "
-                f"I've sent them a direct message to complete their profile. - {BOT_USERNAME}",
+                "I've sent them a direct message to complete their profile.",
                 parse_mode=ParseMode.HTML,
+                reply_markup=start_keyboard,
             )
         except Exception as e:
             logger.warning(f"Failed to DM user {target.id}: {e}")
+            start_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Start Chat", url=f"https://t.me/{BOT_USERNAME.lstrip('@')}")]
+            ])
             await message.reply_text(
                 f"⚠️ {target_mention} has been nominated, but I couldn't send them a DM. "
-                f"They may need to start me first: {BOT_USERNAME}",
+                "Please start a chat with me first by clicking the button below.",
                 parse_mode=ParseMode.HTML,
+                reply_markup=start_keyboard,
             )
     else:
-        #User hasn't started the bot yet
+        # User hasn't started the bot yet
+        start_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Start Chat", url=f"https://t.me/{BOT_USERNAME.lstrip('@')}")]
+        ])
         await message.reply_text(
             f"👋 {target_mention}, you've been nominated as a NEAR Builder by {invoker_mention}!\n\n"
-            f"To complete your profile, please start a chat with me first: {BOT_USERNAME}",
+            "To complete your profile, please start a chat with me first by clicking the button below.",
             parse_mode=ParseMode.HTML,
+            reply_markup=start_keyboard,
         )
 
-#Incoming DM text messages - onboarding answers
+
+# ---------------------------------------------------------------------------
+# Incoming DM text messages - onboarding answers
+# ---------------------------------------------------------------------------
 
 async def handle_dm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -325,7 +375,7 @@ async def handle_dm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = get_session(user.id)
 
-    #Not in a session
+    # Not in a session
     if state.current_step is None:
         await update.message.reply_text(
             "Use /start to begin your builder profile onboarding, "
@@ -333,12 +383,12 @@ async def handle_dm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    #Already done - prompt them to confirm or edit
+    # Already done - prompt them to confirm or edit
     if state.current_step == "done" and state.editing_field is None:
         await send_summary(user.id, context)
         return
 
-    #Handle links sub-flow text input
+    # Handle links sub-flow text input
     if (state.current_step == "links" or state.editing_field == "links"):
         if state.links_sub_step == "awaiting_label":
             label = text.strip()
@@ -365,17 +415,17 @@ async def handle_dm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_links_overview(user.id, context)
             return
 
-    #Validate and store the answer.
-    #✂️ prefix = soft warning (answer accepted, trimmed) - show message but continue
-    #⚠️ prefix = hard validation error - show message and re-ask the same question
+    # Validate and store the answer.
+    # ✂️ prefix = soft warning (answer accepted, trimmed)- show message but continue
+    # ⚠️ prefix = hard validation error- show message and re-ask the same question
     message_out = apply_answer(state, text)
 
     if message_out:
         await update.message.reply_text(message_out, parse_mode=ParseMode.HTML)
         if message_out.startswith("⚠️"):
-            return  #stay on the same step
+            return  # stay on the same step
 
-    #Advance the flow
+    # Advance the flow
     new_step = next_step(state)
 
     if new_step == "done":
@@ -383,7 +433,10 @@ async def handle_dm_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await send_next_question(user.id, context)
 
-#Inline button callbacks - edit field or confirm
+
+# ---------------------------------------------------------------------------
+# Inline button callbacks - edit field or confirm
+# ---------------------------------------------------------------------------
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -399,7 +452,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ Submitting your profile...",
         )
 
-        #Fetch nomination context from DB for the API payload
+        # Fetch nomination context from DB for the API payload
         nomination = db.get_nomination(user.id)
         nominated_by = nomination["nominated_by_user_id"] if nomination else None
         group_chat_id = nomination["group_chat_id"] if nomination else None
@@ -438,14 +491,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("skill:"):
         skill = data.split(":", 1)[1]
         toggle_skill(state, skill)
-        #Update the keyboard in-place
+        # Update the keyboard in-place
         selected = get_selected_skills(state)
         try:
             await query.edit_message_reply_markup(
                 reply_markup=build_skills_keyboard(selected),
             )
         except Exception:
-            pass  #message unchanged - no-op
+            pass  # message unchanged- no-op
 
     elif data == "skills_done":
         new_step = next_step(state)
@@ -518,14 +571,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-#Entry point
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 async def post_init(application):
-    """Register bot commands so they appear in the Telegram command menu."""
-    await application.bot.set_my_commands([
-        BotCommand("onboard", "Nominate someone as a NEAR Builder"),
-    ])
-    logger.info("Bot commands registered.")
+    """Clear all command menu entries so the button doesn't appear in any chat."""
+    from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
+
+    await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
+    await application.bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+    await application.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
+    logger.info("Bot command menu cleared.")
 
 
 def main():
@@ -537,20 +594,21 @@ def main():
 
     app = Application.builder().token(token).post_init(post_init).build()
 
-    #Commands
+    # Commands
     app.add_handler(CommandHandler("start", cmd_start, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("onboard", cmd_nominate, filters=filters.ChatType.GROUPS))
 
-    #DM text messages (onboarding answers)
+    # DM text messages (onboarding answers)
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
         handle_dm_message,
     ))
 
-    #Inline button presses
+    # Inline button presses
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("Bot is running...")
+    # Python 3.10+ no longer auto-creates an event loop - create one explicitly
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
